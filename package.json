@@ -1,0 +1,9 @@
+{
+  "name": "kkokkkok-multi-research-poc",
+  "private": true,
+  "type": "module",
+  "scripts": {
+    "zones": "node scripts/build-zones.mjs",
+    "start": "node server.mjs"
+  }
+}
