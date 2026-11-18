@@ -1,18 +1,26 @@
-// Map check of a zone's combinations: how many places really have the pattern.
+// Map check of a zone: how many places really have the pattern its photos show.
 //   node --env-file=<lab>/.env scripts/verify-zone.mjs G1
-// The zone judgement (analyze-zone.mjs) only estimates "a few places fit". This step counts them:
-//   1. Claude turns each member of a combination into a search condition: an area written in a
-//      clue ("마포구"), a kind of place (school, clothing shop), or nothing searchable. It sees the
-//      clue texts only, as the zone judgement did. Kept in map-spec.json and asked once.
-//   2. Kakao Local lists every place of the rarest kind inside the area, then looks around each one
-//      for the other kinds. A place that has them all within TOLERANCE_M is a candidate. Candidates
-//      next to each other are one place.
-//   3. The count sets the unit: 1 = a single point (high), 2-5 = a few places (medium), more = the
+// The zone judgement (analyze-zone.mjs) only estimates "a few places fit". This step counts them.
+//   1. Claude turns every clue left in the zone into a search condition: an area written in a clue
+//      ("마포구"), a kind of place (school, clothing shop) with the chain's name when the clue states
+//      one (GS25), or nothing searchable. It sees the clue texts only. Kept in map-spec.json.
+//   2. Two patterns are counted on Kakao Local:
+//        places       every place clue of the zone, laid over each other one at a time
+//        combination  each combination the zone judgement gave, with its own members
+//      The search area is the one a clue names; when no clue names one it is Seoul, which is an
+//      assumption (nothing in the photos says so) and is marked as such.
+//   3. For a pattern, each kind's number in the area is asked first (one query). The rarest kind
+//      is listed in full, and the other kinds are looked for around each of those places, rarest
+//      first, on the places still left. A place that has them all within TOLERANCE_M is a
+//      candidate; candidates next to each other are one place.
+//   4. The count sets the unit: 1 = a single point (high), 2-5 = a few places (medium), more = the
 //      area as a whole (low). The zone's risk is worked out again from that.
+// A kind that is not found at the real zone (the map does not list that shop, or the condition is
+// wrong) is left out of the pattern and reported; this uses the true position, on this machine only,
+// and keeps a bad condition from throwing the real place out.
 // What an appearance says (a granite gate, a historic hall) cannot be searched, so only the kind of
 // place is counted and the count is an upper bound: the real number is that or fewer.
-// The photos' coordinates are never sent. Kakao is asked about the area and about public places in
-// it; which candidate is the real zone is decided here, from zones.json.
+// The photos' coordinates are never sent. Kakao is asked about the area and about public places in it.
 //   private-data/zone-analysis/<zone>/map-spec.json    the search conditions (Claude's answer)
 //   private-data/zone-analysis/<zone>/map-check.json   the candidates and the adjusted risk
 import { readFileSync,writeFileSync,existsSync } from 'node:fs';
@@ -28,8 +36,11 @@ process.env.KKOK_LEGACY_ROOT||='C:/KKokKKok/KkokKkok-PoC';
 const readJson=path=>JSON.parse(readFileSync(path,'utf8'));
 // Two things seen from photos within 100m of each other, measured between the points a map gives
 // them: a school's point is the middle of its grounds, about 100m from its gate.
-const TOLERANCE_M=200,LOOK_M=300,SENSITIVITY=[100,200,300];
-const FEW_MAX=5;
+const TOLERANCE_M=200,FEW_MAX=5;
+// A kind with more places than this in the area is not listed in full (it is still looked for
+// around the places of a rarer kind); and a run stops asking after this many queries.
+const LIST_MAX=6000,CALL_MAX=20000,SHOWN_MAX=300;
+const DEFAULT_AREA='서울';
 const unitOf=count=>count===1?'point':count<=FEW_MAX?'few':'city';
 
 const zoneId=process.argv[2];
@@ -39,128 +50,153 @@ if(!zone||!existsSync(resolve(directory,'result.json'))){console.error('usage: n
 const result=readJson(resolve(directory,'result.json')),evidence=new Map(result.evidence.map(item=>[item.id,item]));
 
 // ---------- 1. search conditions ----------
-const SPEC_TEMPLATE=`A set of clues from several photographs taken within 100 metres of each other is said to fit only a few places. That claim is going to be checked on a map service (Kakao Local, South Korea). Turn each clue into a search condition. You do not see the photographs. Never name or guess the actual place, shop, school or brand: give only what the clue itself states.
+const SPEC_TEMPLATE=`The clues below come from several photographs taken within 100 metres of each other. Whether they narrow down a place is going to be checked on a map service (Kakao Local, South Korea). Turn each clue into a search condition. You do not see the photographs. Never guess the actual place: give only what the clue itself states.
 
 For every clue answer one of:
 - "area": the clue is a text naming an administrative area (a city, a district, a neighbourhood). Give "areaName" in Korean as a map would write it, with the city in front when you are sure of it (for example "서울 마포구").
-- "place": the clue shows a kind of place a map lists (a school, a clothing shop, a hospital, a subway station). Give
-    "label": the kind in Korean, short (for example "초·중학교", "의류 매장"),
+- "place": the clue shows a place a map lists (a school, a clothing shop, a convenience store, a subway station), seen at or near where the photo was taken. Give
+    "label": the kind in Korean, short (for example "초·중학교", "의류 매장", "GS25 편의점"),
+    "brand": the name of a chain with many branches, only when the clue's own text states that name (for example "GS25", "스타벅스", "올리브영"); written as the map would write it. null for a kind without a stated chain, and null for a single shop's own name,
     "categoryGroup": one of these Kakao category group codes when one fits, else null:
       MT1 hypermarket, CS2 convenience store, PS3 kindergarten/daycare, SC4 school (all levels, universities included), AC5 private academy, PK6 car park, OL7 petrol station, SW8 subway station, BK9 bank, CT1 cultural facility, AG2 estate agent, PO3 public office, AT4 tourist attraction, AD5 lodging, FD6 restaurant, CE7 cafe, HP8 hospital, PM9 pharmacy
-    "categoryIncludes": Korean words of which at least one must appear in the place's category name, to keep only the fitting kind (for example ["초등학교","중학교"] or ["의류판매"]); [] when the group code alone is right,
+    "categoryIncludes": Korean words of which at least one must appear in the place's category name, to keep only the fitting kind (for example ["초등학교","중학교"] or ["의류"]); [] when the group code or the brand alone is right,
     "keyword": a Korean search word for the kind (for example "중학교", "옷가게"); general, never a name,
     "unsearched": what the clue says beyond the kind that a map search cannot use (the look of a gate, the style of a building), in Korean; null when nothing.
   Be as specific about the kind as the clue allows and no more: if the clue cannot tell an elementary school from a middle school, include both.
-- "none": the clue is not a place a map lists (street furniture, paving, weather). Give "unsearched" in Korean.
+- "none": the clue is not a place a map lists, or says nothing that tells one neighbourhood from another (street furniture, paving, a generic building, an advertisement for something elsewhere, a product someone carries). Give "unsearched" in Korean, or null.
 
-Combinations and their clues:
-<<COMBINATIONS>>
+Clues:
+<<CLUES>>
 
-Answer with JSON only:
-{"combinations":[{"id":"zone-combo-0","members":[{"evidenceId":"E1","role":"area|place|none","areaName":null,"label":null,"categoryGroup":null,"categoryIncludes":[],"keyword":null,"unsearched":null}]}]}`;
-const shown=result.combinations.map(combo=>({id:combo.id,claim:combo.reason,clues:combo.evidenceIds.map(id=>{
-  const item=evidence.get(id);
-  return {evidenceId:id,kind:item.key,...(item.isText?{texts:item.texts}:{}),seenInPhotos:item.photos,descriptions:item.members.flatMap(member=>member.details)};
-})}));
-const specPrompt=SPEC_TEMPLATE.replace('<<COMBINATIONS>>',()=>JSON.stringify(shown,null,2)),specSha=createHash('sha256').update(specPrompt).digest('hex');
+Answer with JSON only, every clue once:
+{"clues":[{"evidenceId":"E1","role":"area|place|none","areaName":null,"label":null,"brand":null,"categoryGroup":null,"categoryIncludes":[],"keyword":null,"unsearched":null}]}`;
+// Every clue left in the zone except the scene-wide ones (language, season, weather, layout).
+const asked=result.evidence.filter(item=>!item.key.startsWith('scene|'));
+const shown=asked.map(item=>({evidenceId:item.id,kind:item.key,...(item.isText?{texts:item.texts}:{}),seenInPhotos:item.photos,descriptions:[...new Set(item.members.flatMap(member=>member.details))]}));
+const specPrompt=SPEC_TEMPLATE.replace('<<CLUES>>',()=>JSON.stringify(shown,null,2)),specSha=createHash('sha256').update(specPrompt).digest('hex');
 const specPath=resolve(directory,'map-spec.json');
 let spec=existsSync(specPath)?readJson(specPath):null;
-if(result.combinations.length&&spec?.promptSha256!==specSha){
+if(asked.length&&spec?.promptSha256!==specSha){
   const provider=(await import(pathToFileURL(resolve(lab,'lib/paper-claude.mjs')).href)).researchProvider(process.env),stage=provider.stage('rules');
   if(provider.name!=='claude'||!provider.configured(stage)){console.error(`No Claude credential. ${provider.hint}`);process.exit(2);}
   const reply=await provider.llm({model:stage.model,reasoningEffort:stage.reasoningEffort,text:specPrompt});
   const text=reply.text.replace(/^\uFEFF/,''),json=JSON.parse(text.slice(text.indexOf('{'),text.lastIndexOf('}')+1));
-  spec={promptSha256:specSha,answeredAt:new Date().toISOString(),model:reply.raw?.responseModel??stage.model,combinations:json.combinations};
+  spec={promptSha256:specSha,answeredAt:new Date().toISOString(),model:reply.raw?.responseModel??stage.model,clues:json.clues};
   writeFileSync(specPath,JSON.stringify(spec,null,1));
 }
+const featureOf=id=>{
+  const member=(spec?.clues||[]).find(item=>item.evidenceId===id)||{role:'none'},item=evidence.get(id);
+  const feature={evidenceId:id,key:item.key,texts:item.isText?item.texts:[],photos:item.photos,role:member.role,areaName:member.areaName??null,label:member.label??null,brand:member.brand??null,
+    categoryGroup:member.categoryGroup??null,categoryIncludes:member.categoryIncludes??[],keyword:member.keyword??null,unsearched:member.unsearched??null};
+  if(feature.role==='place'&&!(feature.brand||feature.categoryGroup||feature.keyword))feature.role='none';
+  return feature;
+};
+const all=asked.map(item=>featureOf(item.id));
 
-// ---------- 2. candidates ----------
+// ---------- 2. the area ----------
 const api=kakao();
 // The rectangle searched around an area's centre; what lies outside the area is dropped by address.
 const SPAN={1:[0.3,0.35],2:[0.12,0.15],3:[0.04,0.05]};
 const centre={lat:zone.center.lat,lon:zone.center.lon};
-async function check(combo){
-  const members=(spec.combinations.find(item=>item.id===combo.id)?.members||[]).filter(member=>combo.evidenceIds.includes(member.evidenceId));
-  const features=combo.evidenceIds.map(id=>{
-    const member=members.find(item=>item.evidenceId===id)||{role:'none'},item=evidence.get(id);
-    return {evidenceId:id,key:item.key,texts:item.isText?item.texts:[],photos:item.photos,role:member.role,areaName:member.areaName??null,label:member.label??null,categoryGroup:member.categoryGroup??null,categoryIncludes:member.categoryIncludes??[],keyword:member.keyword??null,unsearched:member.unsearched??null};
-  });
-  const base={id:combo.id,type:combo.type,evidenceIds:combo.evidenceIds,claim:combo.reason,unitBefore:combo.unit,features,toleranceM:TOLERANCE_M};
-  const keep=(verdict,note)=>({...base,verdict,note,unitAfter:combo.unit,candidates:[],count:null});
-  const areaName=features.filter(item=>item.role==='area'&&item.areaName).map(item=>item.areaName).sort((a,b)=>b.length-a.length)[0];
-  const places=features.filter(item=>item.role==='place'&&(item.categoryGroup||item.keyword));
-  if(!areaName)return keep('unverifiable','조합에 지역 이름이 적힌 단서가 없어 어디를 찾을지 정할 수 없습니다. 판정 모델의 추정을 그대로 둡니다.');
-  if(!places.length)return keep('unverifiable','조합에 지도가 장소로 싣는 종류의 단서가 없어 셀 수 없습니다. 판정 모델의 추정을 그대로 둡니다.');
-  const area=await api.area(areaName);
-  if(!area)return keep('unverifiable',`지도에서 지역 "${areaName}"을(를) 찾지 못했습니다.`);
-  const [dLat,dLon]=SPAN[area.depth],box=[area.lon-dLon,area.lat-dLat,area.lon+dLon,area.lat+dLat];
-  const inArea=item=>item.address.startsWith(area.name);
-  // The rarest kind is listed in full. Kinds with a category group are cheap to list; a kind known
-  // by keyword only is listed when there is no other.
-  const listable=places.filter(item=>item.categoryGroup),lists=[];
-  for(const feature of listable.length?listable:[places[0]])lists.push({feature,all:(await api.within(feature,box)).filter(inArea)});
-  lists.sort((a,b)=>a.all.length-b.all.length);
-  const anchor=lists[0],others=places.filter(item=>item!==anchor.feature);
-  const spots=[];
-  for(const place of anchor.all){
-    const near=[];
-    for(const feature of others){
-      const found=(await api.around(feature,place,LOOK_M)).filter(item=>item.id!==place.id)[0];
-      near.push(found?{evidenceId:feature.evidenceId,name:found.name,category:found.category,address:found.address,lat:found.lat,lon:found.lon,distanceM:found.distanceM}:null);
-    }
-    spots.push({place,near,reach:Math.max(0,...near.map(item=>item?item.distanceM:Infinity))});
-  }
-  // Spots next to each other are one place (two buildings of one campus).
-  const group=limit=>{
-    const fit=spots.filter(spot=>spot.reach<=limit),groups=[];
-    for(const spot of fit){
-      const joined=groups.filter(items=>items.some(other=>metres(other.place,spot.place)<=limit));
-      const merged=[spot,...joined.flat()];
-      for(const items of joined)groups.splice(groups.indexOf(items),1);
-      groups.push(merged);
-    }
-    return groups;
-  };
-  const candidates=group(TOLERANCE_M).map(items=>{
-    const points=items.flatMap(spot=>[spot.place,...spot.near]);
-    return {lat:items.reduce((sum,spot)=>sum+spot.place.lat,0)/items.length,lon:items.reduce((sum,spot)=>sum+spot.place.lon,0)/items.length,
-      // Decided on this machine: the zone's own centre is not part of any request.
-      offM:Math.min(...points.map(point=>metres(point,centre))),
-      places:items.map(spot=>({evidenceId:anchor.feature.evidenceId,name:spot.place.name,category:spot.place.category,address:spot.place.address,lat:spot.place.lat,lon:spot.place.lon,
-        near:spot.near.map(item=>({evidenceId:item.evidenceId,name:item.name,category:item.category,lat:item.lat,lon:item.lon,distanceM:item.distanceM}))}))};
-  });
-  // The real zone is the candidate nearest to it, when that one is near enough: a place's point may
-  // be TOLERANCE_M from what the photos show, and the photos up to 100m from the zone's centre.
-  const nearest=candidates.reduce((a,b)=>a===null||b.offM<a.offM?b:a,null);
-  for(const item of candidates){item.isTrue=item===nearest&&item.offM<=TOLERANCE_M+100;delete item.offM;}
-  candidates.sort((a,b)=>Number(b.isTrue)-Number(a.isTrue));
-  const count=candidates.length,trueFound=candidates.some(item=>item.isTrue);
-  const upperBound=features.some(item=>item.role==='none'||item.unsearched);
-  const common={...base,area:{asked:areaName,name:area.name,lat:area.lat,lon:area.lon},anchor:{evidenceId:anchor.feature.evidenceId,label:anchor.feature.label,total:anchor.all.length},
-    candidates,count,countsByTolerance:Object.fromEntries(SENSITIVITY.map(limit=>[limit,group(limit).length])),upperBound,trueFound};
-  if(!trueFound)return {...common,verdict:'missed',unitAfter:combo.unit,note:`검색 조건에 맞는 곳 ${count}곳 중에 실제 촬영 구역이 없습니다. 검색 조건이 실제 장소를 놓친 것이므로 이 개수로 위험도를 바꾸지 않습니다.`};
-  const unitAfter=unitOf(count),verdict=rank(unitAfter)<rank(combo.unit)?'raised':rank(unitAfter)>rank(combo.unit)?'lowered':'kept';
-  const bound=upperBound?' 모양·분위기는 지도에서 찾을 수 없어 장소의 종류만 셌으므로, 실제로 맞는 곳은 이보다 적을 수 있습니다.':'';
-  return {...common,verdict,unitAfter,note:`${area.name} 안에서 이 패턴이 있는 곳은 ${count}곳입니다 (실제 촬영 구역 포함).${count>1?` 다른 ${count-1}곳에도 같은 패턴이 있습니다.`:' 다른 곳에는 없습니다.'}${bound}`};
-}
-const combinations=[];
-for(const combo of result.combinations)combinations.push(await check(combo));
+// The attacker reads all the photos, so an area named in any of them is known for every pattern.
+const named=all.filter(item=>item.role==='area'&&item.areaName).sort((a,b)=>b.areaName.length-a.areaName.length)[0]??null;
+const area=await api.area(named?.areaName??DEFAULT_AREA),assumedArea=!named;
+const box=area?[area.lon-SPAN[area.depth][1],area.lat-SPAN[area.depth][0],area.lon+SPAN[area.depth][1],area.lat+SPAN[area.depth][0]]:null;
+const inArea=item=>item.address.startsWith(area.name);
 
-// ---------- 3. the zone's risk, worked out again ----------
-// A combination counts only while it is narrower than each of its members.
+// ---------- 3. one pattern ----------
+// The same kind asked for twice (two clues, one condition) is one condition.
+const sameKind=(a,b)=>a.brand===b.brand&&a.categoryGroup===b.categoryGroup&&(a.brand||a.categoryGroup||a.keyword===b.keyword)&&a.categoryIncludes.join('|')===b.categoryIncludes.join('|');
+const merged=spots=>{
+  const groups=[];
+  for(const spot of spots){
+    const joined=groups.filter(items=>items.some(other=>metres(other.place,spot.place)<=TOLERANCE_M)),together=[spot,...joined.flat()];
+    for(const items of joined)groups.splice(groups.indexOf(items),1);
+    groups.push(together);
+  }
+  return groups;
+};
+async function pattern(features){
+  const places=[];
+  for(const feature of features.filter(item=>item.role==='place'))if(!places.some(other=>sameKind(other,feature)))places.push(feature);
+  if(!area)return {verdict:'unverifiable',note:`지도에서 지역 "${named?.areaName??DEFAULT_AREA}"을(를) 찾지 못했습니다.`};
+  if(!places.length)return {verdict:'unverifiable',note:'지도가 장소로 싣는 종류의 단서가 없어 셀 수 없습니다.'};
+  const numbers=new Map();
+  for(const feature of places)numbers.set(feature,await api.count(feature,box));
+  const order=[...places].sort((a,b)=>numbers.get(a)-numbers.get(b)),steps=[],absent=[];
+  // The rarest kind that is found at the real zone is the one listed in full.
+  let anchor=null,alive=null,truth=null;
+  for(const feature of order){
+    if(numbers.get(feature)>LIST_MAX||api.calls>CALL_MAX)break;
+    const spots=(await api.within(feature,box)).filter(inArea).map(place=>({place,near:[]}));
+    const nearest=spots.reduce((a,b)=>a===null||metres(b.place,centre)<metres(a.place,centre)?b:a,null);
+    if(nearest&&metres(nearest.place,centre)<=TOLERANCE_M+100){anchor=feature;alive=spots;truth=nearest;break;}
+    absent.push(feature);
+    steps.push({evidenceId:feature.evidenceId,label:feature.label,inArea:spots.length,skipped:true,count:null});
+  }
+  if(!anchor)return {verdict:absent.length?'missed':'unverifiable',steps,note:`${absent.length?`가장 드문 종류부터 찾았지만 실제 구역 근처에서는 지도에 나오지 않았습니다(${absent.map(item=>item.label).join(', ')}).`:'장소 종류가 모두 너무 흔해서 전부 찾지 않았습니다.'} 이 패턴으로는 세지 못했습니다.`};
+  steps.push({evidenceId:anchor.evidenceId,label:anchor.label,inArea:alive.length,skipped:false,count:merged(alive).length});
+  for(const feature of order.filter(item=>item!==anchor&&!absent.includes(item))){
+    if(api.calls>CALL_MAX){steps.push({evidenceId:feature.evidenceId,label:feature.label,inArea:numbers.get(feature),skipped:true,stopped:true,count:null});continue;}
+    const found=new Map();
+    for(const spot of alive){const near=(await api.around(feature,spot.place,TOLERANCE_M))[0];if(near)found.set(spot,near);}
+    // Not at the real zone: the map does not list it there, or the condition is wrong. Left out.
+    if(!found.has(truth)){absent.push(feature);steps.push({evidenceId:feature.evidenceId,label:feature.label,inArea:numbers.get(feature),skipped:true,count:null});continue;}
+    alive=alive.filter(spot=>found.has(spot));
+    for(const spot of alive)if(found.get(spot).id!==spot.place.id)spot.near.push({evidenceId:feature.evidenceId,name:found.get(spot).name,category:found.get(spot).category,lat:found.get(spot).lat,lon:found.get(spot).lon,distanceM:found.get(spot).distanceM});
+    steps.push({evidenceId:feature.evidenceId,label:feature.label,inArea:numbers.get(feature),skipped:false,count:merged(alive).length});
+  }
+  const groups=merged(alive),count=groups.length;
+  const candidates=groups.map(items=>({lat:items.reduce((sum,spot)=>sum+spot.place.lat,0)/items.length,lon:items.reduce((sum,spot)=>sum+spot.place.lon,0)/items.length,isTrue:items.includes(truth),
+    places:items.map(spot=>({evidenceId:anchor.evidenceId,name:spot.place.name,category:spot.place.category,address:spot.place.address,lat:spot.place.lat,lon:spot.place.lon,near:spot.near}))}))
+    .sort((a,b)=>Number(b.isTrue)-Number(a.isTrue)).slice(0,SHOWN_MAX);
+  const used=places.filter(item=>!absent.includes(item));
+  const upperBound=used.some(item=>item.unsearched)||absent.length>0||features.some(item=>item.role==='none');
+  const others=count>1?` 다른 ${count-1}곳에도 같은 패턴이 있습니다.`:' 다른 곳에는 없습니다.';
+  const left=absent.length?` ${absent.map(item=>item.label).join(', ')}은(는) 실제 구역 근처에서 지도에 나오지 않아 조건에서 뺐습니다.`:'';
+  const bound=upperBound?' 모양·분위기와 지도에 없는 것은 셀 수 없어, 실제로 맞는 곳은 이보다 적을 수 있습니다.':'';
+  return {verdict:'counted',steps,anchor:{evidenceId:anchor.evidenceId,label:anchor.label,total:steps.find(step=>step.evidenceId===anchor.evidenceId).inArea},candidates,count,shown:candidates.length,upperBound,trueFound:true,
+    used:used.map(item=>item.evidenceId),absent:absent.map(item=>item.evidenceId),
+    note:`${area.name}${assumedArea?'(가정)':''} 안에서 ${used.map(item=>item.label).join(' + ')}이(가) 서로 ${TOLERANCE_M}m 안에 모인 곳은 ${count}곳입니다 (실제 촬영 구역 포함).${others}${left}${bound}`};
+}
+const describe=(base,features,unitBefore,counted)=>{
+  const common={...base,features,toleranceM:TOLERANCE_M,area:area?{asked:named?.areaName??DEFAULT_AREA,name:area.name,assumed:assumedArea}:null,unitBefore,countsByTolerance:{},...counted};
+  if(counted.verdict!=='counted')return {...common,unitAfter:unitBefore,candidates:[],count:null};
+  // More places than a few: the pattern says no more than the area does. An area that was only
+  // assumed is not something the photos gave away, so the unit stays what it was.
+  const unitAfter=counted.count>FEW_MAX&&assumedArea?unitBefore:unitOf(counted.count);
+  return {...common,unitAfter,verdict:rank(unitAfter)<rank(unitBefore)?'raised':rank(unitAfter)>rank(unitBefore)?'lowered':'kept'};
+};
+const combinations=[];
+// Every place clue of the zone, laid over each other.
+const placeFeatures=all.filter(item=>item.role!=='none');
+if(placeFeatures.some(item=>item.role==='place')){
+  const members=placeFeatures.map(item=>item.evidenceId);
+  combinations.push(describe({id:'zone-places',kind:'places',type:'places',evidenceIds:members,claim:'구역의 사진들에 나온 장소 단서를 전부 겹쳤을 때'},placeFeatures,narrowest(members.map(id=>evidence.get(id).unit)),await pattern(placeFeatures)));
+}
+// Each combination the zone judgement gave.
+for(const combo of result.combinations){
+  const features=combo.evidenceIds.map(featureOf);
+  combinations.push(describe({id:combo.id,kind:'combination',type:combo.type,evidenceIds:combo.evidenceIds,claim:combo.reason},features,combo.unit,await pattern(features)));
+}
+
+// ---------- 4. the zone's risk, worked out again ----------
+// A pattern counts only while it is narrower than each of its members.
 const standing=combinations.filter(combo=>rank(combo.unitAfter)<rank(narrowest(combo.evidenceIds.map(id=>evidence.get(id).unit))));
 const best=standing.reduce((a,b)=>a===null||rank(b.unitAfter)<rank(a.unitAfter)?b:a,null);
 const unitAfter=narrowest([result.clueUnit,result.photoUnit,...standing.map(combo=>combo.unitAfter)]);
 const raised=Boolean(best)&&rank(best.unitAfter)<rank(result.clueUnit)&&rank(best.unitAfter)<rank(result.photoUnit);
-const changed=combinations.filter(combo=>combo.verdict==='raised'||combo.verdict==='lowered');
+const counted=combinations.filter(combo=>combo.count!==null);
 const risk=unit=>`${RISK_KO[UNITS[unit].risk]}(${UNITS[unit].ko})`;
+const name=combo=>combo.kind==='places'?'사진들의 장소 단서를 전부 겹치면':'판정 모델이 낸 조합은';
 let statement;
-if(!combinations.length)statement='지도로 확인할 조합이 없습니다.';
-else if(!changed.length)statement=`지도에서 센 결과가 판정 모델의 추정과 같거나, 지도로 셀 수 없었습니다. 구역의 위험도는 ${risk(unitAfter)} 그대로입니다.`;
-else statement=`${changed.map(combo=>`${combo.area.name}에서 이 패턴이 있는 곳을 지도로 세면 ${combo.count}곳이라 조합의 범위가 ${UNITS[combo.unitBefore].ko} → ${UNITS[combo.unitAfter].ko}로 ${combo.verdict==='raised'?'좁아집니다':'넓어집니다'}.`).join(' ')} 구역의 위험도는 ${risk(result.zoneUnit)} → ${risk(unitAfter)}${unitAfter===result.zoneUnit?' (변화 없음: 사진 한 장만으로 이미 이 범위)':''}입니다.`;
-const output={schemaVersion:'zone-map-check-v1',zone:zoneId,createdAt:new Date().toISOString(),source:'Kakao Local API',kakaoCalls:api.calls,toleranceM:TOLERANCE_M,fewMax:FEW_MAX,specModel:spec?.model??null,
-  combinations,zoneUnitBefore:result.zoneUnit,zoneUnitAfter:unitAfter,zoneRiskAfter:UNITS[unitAfter].risk,raisedAfter:raised,statement};
+if(!combinations.length)statement='지도로 셀 수 있는 장소 단서가 없습니다.';
+else if(!counted.length)statement=`지도로 세지 못했습니다. 구역의 위험도는 ${risk(unitAfter)} 그대로입니다.`;
+else statement=`${counted.map(combo=>`${name(combo)} ${combo.area.name}${combo.area.assumed?'(가정)':''}에서 ${combo.count}곳(${UNITS[combo.unitAfter].ko})입니다.`).join(' ')} ${raised?`단독으로는 ${UNITS[narrowest([result.clueUnit,result.photoUnit])].ko}까지였으므로 누적으로 더 위험해졌습니다. 구역의 위험도는 ${risk(unitAfter)}입니다.`:`구역의 위험도는 ${risk(result.zoneUnit)} → ${risk(unitAfter)}${unitAfter===result.zoneUnit?' (변화 없음)':''}입니다.`}`;
+const output={schemaVersion:'zone-map-check-v2',zone:zoneId,createdAt:new Date().toISOString(),source:'Kakao Local API',kakaoCalls:api.calls,toleranceM:TOLERANCE_M,fewMax:FEW_MAX,specModel:spec?.model??null,
+  area:area?{name:area.name,assumed:assumedArea}:null,combinations,zoneUnitBefore:result.zoneUnit,zoneUnitAfter:unitAfter,zoneRiskAfter:UNITS[unitAfter].risk,raisedAfter:raised,statement};
 writeFileSync(resolve(directory,'map-check.json'),JSON.stringify(output,null,1));
-console.log(JSON.stringify({zone:zoneId,kakaoCalls:api.calls,zoneUnitBefore:result.zoneUnit,zoneUnitAfter:unitAfter,raisedAfter:raised,
-  combinations:combinations.map(combo=>({id:combo.id,verdict:combo.verdict,area:combo.area?.name,features:combo.features.map(item=>`${item.evidenceId}:${item.role}:${item.label??item.areaName??''}:${item.categoryGroup??item.keyword??''}:${item.categoryIncludes.join('|')}`),anchorTotal:combo.anchor?.total,count:combo.count,byTolerance:combo.countsByTolerance,trueFound:combo.trueFound,upperBound:combo.upperBound,unit:`${combo.unitBefore}->${combo.unitAfter}`}))},null,1));
+console.log(JSON.stringify({zone:zoneId,kakaoCalls:api.calls,area:output.area,zoneUnit:`${result.zoneUnit}->${unitAfter}`,raisedAfter:raised,
+  combinations:combinations.map(combo=>({id:combo.id,verdict:combo.verdict,count:combo.count,unit:`${combo.unitBefore}->${combo.unitAfter}`,
+    steps:(combo.steps||[]).map(step=>`${step.label}[${step.inArea}]${step.skipped?' 뺌':` → ${step.count}곳`}`)}))},null,1));
 console.log(statement);

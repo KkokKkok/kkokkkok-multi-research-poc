@@ -50,6 +50,13 @@ function showZone(zone,runId=null){
   Promise.all([getJson(`/api/analysis/${zone.id}`),getJson(`/api/map-check/${zone.id}`)]).then(([result,check])=>showAnalysis(zone,result,check));
 }
 const VERDICT={raised:'지도로 세니 더 좁음',lowered:'지도로 세니 더 넓음',kept:'지도로 세도 같음',missed:'검색이 실제 장소를 놓침',unverifiable:'지도로 셀 수 없음'};
+const PATTERN={places:'사진들의 장소 단서를 전부 겹치면',combination:'판정 모델이 낸 조합'};
+const areaName=combo=>combo.area?`${escapeHtml(combo.area.name)}${combo.area.assumed?' <small>(단서에 지역 이름이 없어 가정)</small>':''}`:'';
+// How the count shrank as each kind of place was laid over the last: "학교 31곳 → 의류 매장 24곳".
+const stepsLine=combo=>{
+  const steps=combo.steps||[],used=steps.filter(step=>!step.skipped),left=steps.filter(step=>step.skipped);
+  return `${used.map(step=>`${escapeHtml(step.label)} <b>${step.count}곳</b>`).join(' → ')}${left.length?`<br><small>실제 구역 근처 지도에 없어 뺀 조건: ${left.map(step=>escapeHtml(step.label)).join(', ')}</small>`:''}`;
+};
 const featureLine=feature=>feature.role==='area'?`<code>${escapeHtml(feature.areaName)}</code> 안에서`:feature.role==='place'?`${escapeHtml(feature.label)}${feature.unsearched?' <small>(모양은 검색 불가)</small>':''}`:'<small>검색 불가</small>';
 // The cumulative analysis of the zone: what its photos give away alone, and what they add together.
 const UNIT={point:'지점 하나',few:'몇 곳 / 동네',city:'도시·구',country:'국가·광역'};
@@ -65,7 +72,7 @@ function showAnalysis(zone,result,check=null){
     <b>누적 분석 · ${unitTag(check?.combinations.length?check.zoneUnitAfter:result.zoneUnit)}</b>
     <p class="statement">${escapeHtml(result.statement)}</p>
     ${check?.combinations.length?`<div class="mapcheck"><b>지도 확인 (카카오 장소 검색)</b><p class="statement">${escapeHtml(check.statement)}</p>
-      ${check.combinations.map(combo=>`<div class="combo">${combo.features.map(featureLine).join(' + ')} · 서로 ${combo.toleranceM}m 안<br>
+      ${check.combinations.map(combo=>`<div class="combo"><b>${PATTERN[combo.kind]||PATTERN.combination}</b> · ${areaName(combo)} · 서로 ${combo.toleranceM}m 안<br>${stepsLine(combo)}${(combo.steps||[]).length?'<br>':''}
         ${combo.count===null?'':`<b>${combo.count}곳</b>${combo.upperBound?' 이하':''} · `}${UNIT[combo.unitBefore]} → <span class="risk ${UNIT_RISK[combo.unitAfter]}">${UNIT[combo.unitAfter]}</span> · ${VERDICT[combo.verdict]}<br><span class="why">${escapeHtml(combo.note)}</span></div>`).join('')}
       <p class="legend"><i style="background:${HERE}"></i>이 구역 <i style="background:${ELSEWHERE}"></i>같은 패턴이 있는 다른 곳</p>
       <button class="see-candidates">지도에서 후보 전부 보기</button></div>`:''}
@@ -151,14 +158,15 @@ function showProof(zone,result,check=null){
     </div>`).join('')}
 
     ${checked?`<h2>4. 지도로 세어 봅니다</h2>
-    <p>3의 "몇 곳"은 모델의 추정입니다. 조합의 단서를 지도 검색 조건으로 바꿔, 그 조건이 서로 ${checked.toleranceM}m 안에 모여 있는 곳을 카카오 장소 검색으로 전부 찾았습니다. 1곳이면 지점 하나(높음), 2~${checked.fewMax}곳이면 몇 곳(중간), 그보다 많으면 도시·구(낮음)입니다.</p>
+    <p>3의 "몇 곳"은 모델의 추정입니다. 구역에 남은 단서를 지도 검색 조건으로 바꿔(읽힌 체인 이름 포함), 그 조건이 서로 ${checked.toleranceM}m 안에 모여 있는 곳을 카카오 장소 검색으로 전부 찾았습니다. 가장 드문 종류의 장소를 전부 찾은 뒤, 나머지 종류를 드문 것부터 하나씩 겹쳐 남는 곳을 셉니다. 1곳이면 지점 하나(높음), 2~${checked.fewMax}곳이면 몇 곳(중간), 그보다 많으면 도시·구(낮음)입니다.</p>
     ${checked.combinations.map((combo,number)=>`<div class="combo-card">
-      <h3>조합 ${number+1}의 지도 확인 · ${VERDICT[combo.verdict]}</h3>
-      <table class="wide"><tr><th>단서</th><th>지도에서 찾은 조건</th><th>지도로 찾지 못한 부분</th></tr>${combo.features.map(feature=>`<tr><td>${label(evidence.get(feature.evidenceId))} · 사진 ${feature.photos.join('·')}</td><td>${feature.role==='area'?`지역: ${escapeHtml(feature.areaName)}`:feature.role==='place'?`${escapeHtml(feature.label)} <small>(${escapeHtml([feature.categoryGroup,feature.categoryGroup?null:feature.keyword,...feature.categoryIncludes].filter(Boolean).join(' · '))})</small>`:'없음'}</td><td>${escapeHtml(feature.unsearched||'')}</td></tr>`).join('')}</table>
+      <h3>${PATTERN[combo.kind]||PATTERN.combination} · ${areaName(combo)} · ${VERDICT[combo.verdict]}</h3>
+      <table class="wide"><tr><th>단서</th><th>지도에서 찾은 조건</th><th>지도로 찾지 못한 부분</th></tr>${combo.features.filter(feature=>combo.kind!=='places'||feature.role!=='none').map(feature=>`<tr><td>${label(evidence.get(feature.evidenceId))} · 사진 ${feature.photos.join('·')}</td><td>${feature.role==='area'?`지역: ${escapeHtml(feature.areaName)}`:feature.role==='place'?`${escapeHtml(feature.label)}${feature.brand?` · <b>체인 ${escapeHtml(feature.brand)}</b>`:''} <small>(${escapeHtml([feature.categoryGroup,feature.categoryGroup||feature.brand?null:feature.keyword,...feature.categoryIncludes].filter(Boolean).join(' · '))})</small>`:'없음'}</td><td>${escapeHtml(feature.unsearched||'')}</td></tr>`).join('')}</table>
       <p class="lead ${combo.verdict==='raised'?'raised':''}">${escapeHtml(combo.note)}</p>
       ${combo.candidates.length?`<p class="legend"><i style="background:${HERE}"></i>이 구역: 이 패턴은 여기에 있습니다 <i style="background:${ELSEWHERE}"></i>다른 곳에도 같은 패턴이 있습니다 (원 = ${combo.toleranceM}m)</p>
       <div class="proof-map" data-combo="${number}"></div>
-      <p class="why">${escapeHtml(combo.anchor.label)} ${combo.anchor.total}곳을 전부 찾아 하나씩 주변을 확인했습니다. 거리 기준을 바꾸면: ${Object.entries(combo.countsByTolerance).map(([limit,count])=>`${limit}m ${count}곳`).join(' · ')}</p>
+      <table class="wide"><tr><th>겹친 순서</th><th>조건</th><th>남은 곳</th></tr>${(combo.steps||[]).map((step,index)=>`<tr><td>${index+1}</td><td>${escapeHtml(step.label)}</td><td>${step.skipped?(step.stopped?'호출 한도로 확인하지 않음':'실제 구역 근처 지도에 없어 뺌'):`<b>${step.count}곳</b>`}</td></tr>`).join('')}</table>
+      ${combo.count>combo.candidates.length?`<p class="why">후보가 많아 지도와 목록에는 ${combo.candidates.length}곳만 표시합니다.</p>`:''}
       <details><summary>후보 ${combo.count}곳 목록</summary><table>${combo.candidates.map((candidate,index)=>`<tr><td>${index+1}</td><td>${candidate.isTrue?'<b class="risk high">이 구역</b>':'다른 곳'}</td><td>${candidate.places.map(place=>`${escapeHtml(place.name)}${place.near.map(near=>` + ${escapeHtml(near.name)} (${near.distanceM}m)`).join('')}`).join('<br>')}</td></tr>`).join('')}</table></details>`:''}
     </div>`).join('')}`:''}
 
@@ -222,7 +230,7 @@ fetch('/api/zones').then(response=>response.json()).then(data=>{
       button.querySelector('div').append(document.createElement('br'),line);
       getJson(`/api/map-check/${zone.id}`).then(check=>{
         const counted=(check?.combinations||[]).filter(combo=>combo.count!==null);
-        if(counted.length)line.innerHTML+=` · 지도 확인 ${counted.map(combo=>`${combo.count}곳`).join(', ')}${check.raisedAfter?' · <span class="risk high">지도로도 더 위험</span>':''}`;
+        if(counted.length)line.innerHTML+=`<br>지도 확인 ${counted.map(combo=>`${combo.kind==='places'?'장소 전부':'조합'} ${combo.count}곳`).join(', ')}${check.raisedAfter?' · <span class="risk high">지도로도 더 위험</span>':''}`;
       });
     });
   });
