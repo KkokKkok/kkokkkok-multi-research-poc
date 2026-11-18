@@ -91,3 +91,6 @@ summary{cursor:pointer;color:var(--muted)}
 .legend i:first-child{margin-left:0}
 .see-candidates{border:1px solid var(--line);background:#fff;border-radius:6px;padding:4px 10px;font:inherit;cursor:pointer;margin-bottom:8px}
 .proof-map{height:460px;border:1px solid var(--line);border-radius:8px;margin:8px 0}
+.guess-grid{display:grid;grid-template-columns:repeat(auto-fill,minmax(230px,1fr));gap:12px;margin:12px 0}
+.guess-card{border:1px solid var(--line);border-radius:8px;padding:10px}
+.guess-card ul,.combo-card ul{margin:4px 0;padding-left:18px;font-size:13px;color:var(--muted)}

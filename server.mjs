@@ -31,6 +31,17 @@ createServer((request,response)=>{
     const file=resolve(root,'private-data/zone-analysis',mapCheck[1],'map-check.json');
     return send(response,200,'application/json; charset=utf-8',existsSync(file)?readFileSync(file):'null');
   }
+  // Covered, then guessed (scripts/guess-zone.mjs): the result, and the covered photos.
+  const guess=path.match(/^\/api\/guess\/(G\d+)$/);
+  if(guess){
+    const file=resolve(root,'private-data/zone-guess',guess[1],'result.json');
+    return send(response,200,'application/json; charset=utf-8',existsSync(file)?readFileSync(file):'null');
+  }
+  const masked=path.match(/^\/masked\/(G\d+)\/([0-9a-f-]{36})$/);
+  if(masked){
+    const file=resolve(root,'private-data/zone-guess',masked[1],'masked',`${masked[2]}.jpg`);
+    return existsSync(file)?send(response,200,'image/jpeg',readFileSync(file)):send(response,404,'text/plain','not found');
+  }
   const photo=path.match(/^\/photo\/([0-9a-f-]{36})$/);
   if(photo){
     const file=resolve(lab,'private-data/paper/images',`${photo[1]}.jpg`);

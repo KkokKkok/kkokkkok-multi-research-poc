@@ -79,6 +79,17 @@ node scripts/export-html.mjs
 
 뷰어 전체를 서버 없이 열리는 HTML 파일 하나로 만듭니다(`private-data/export/kkok-zones.html`). 구역 이름을 붙이면(`node scripts/export-html.mjs G1`) 그 구역만 담습니다. 파일에는 사진과 촬영 위치가 들어 있으므로 누구에게 줄지 주의하세요. 지도 타일은 열 때 인터넷에서 받습니다.
 
+## 가린 뒤 맞혀 보기 (평가용)
+
+```bash
+node --env-file=C:/KKokKKok/KkokKkok-Research-PoC/location-cue-lab/.env scripts/guess-zone.mjs G1
+```
+
+단독 분석이 높음으로 잡은 단서를 회색으로 가린 사진을 만들고, Claude에게 위치를 추정하게 합니다. 한 장씩 따로 묻고, 구역의 사진을 한꺼번에 주고 다시 묻습니다. 답한 주소가 실제 위치에서 500m 안이면 장소를, 1000m 안이면 동네를 맞힌 것으로 봅니다. 한 장씩은 못 맞히는데 함께 주면 맞히면, 가려도 남는 누적 위험입니다(`private-data/zone-guess/<구역>/result.json`).
+
+- 위치를 찾지 못한 단서는 가리지 못합니다. 결과에 사진별로 표시됩니다.
+- 구역당 한 번씩만 묻습니다. 모델이 건물 번호를 지어내는 일이 많아 거리는 수백 m씩 흔들릴 수 있습니다.
+
 ## 주의
 
 - `private-data/`에는 사진의 좌표와 단서가 들어 있어 커밋하지 않습니다. 저장소에는 코드만 올립니다.

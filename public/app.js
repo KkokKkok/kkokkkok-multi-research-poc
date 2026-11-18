@@ -47,7 +47,7 @@ function showZone(zone,runId=null){
   showPhoto(zone,runId||zone.photos[0].runId);
   document.getElementById('side').scrollTop=0;
   candidateLayer.clearLayers();
-  Promise.all([getJson(`/api/analysis/${zone.id}`),getJson(`/api/map-check/${zone.id}`)]).then(([result,check])=>showAnalysis(zone,result,check));
+  Promise.all([getJson(`/api/analysis/${zone.id}`),getJson(`/api/map-check/${zone.id}`),getJson(`/api/guess/${zone.id}`)]).then(([result,check,guess])=>showAnalysis(zone,result,check,guess));
 }
 const VERDICT={raised:'지도로 세니 더 좁음',lowered:'지도로 세니 더 넓음',kept:'지도로 세도 같음',missed:'검색이 실제 장소를 놓침',unverifiable:'지도로 셀 수 없음'};
 const PATTERN={places:'사진들의 장소 단서를 전부 겹치면',combination:'판정 모델이 낸 조합'};
@@ -62,7 +62,15 @@ const featureLine=feature=>feature.role==='area'?`<code>${escapeHtml(feature.are
 const UNIT={point:'지점 하나',few:'몇 곳 / 동네',city:'도시·구',country:'국가·광역'};
 const UNIT_RISK={point:'high',few:'medium',city:'low',country:'low'};
 const unitTag=unit=>`<span class="risk ${UNIT_RISK[unit]}">${RISK[UNIT_RISK[unit]]}</span> (${UNIT[unit]})`;
-function showAnalysis(zone,result,check=null){
+// Covered, then guessed: how near the model came with one covered photo, and with all of them.
+const REACH={place:'장소를 맞힘',near:'동네까지 맞힘',miss:'못 맞힘'},REACH_RISK={place:'high',near:'medium',miss:'low'};
+const GUESS_VERDICT={raised:'함께 주면 더 가까이 맞힘',already:'한 장으로도 같은 만큼 맞힘',safe:'가리면 못 맞힘'};
+const far=value=>value===null||value===undefined?'위치를 못 구함':value>=1000?`${(value/1000).toFixed(1)}km`:`${value}m`;
+const runsNote=guess=>guess.runs?.length>1?` <small>(${guess.runs.length}번: ${guess.runs.map(run=>far(run.distanceM)).join(' · ')})</small>`:'';
+const reachTag=guess=>`<span class="risk ${REACH_RISK[guess.reach]}">${REACH[guess.reach]}</span> ${far(guess.distanceM)}${runsNote(guess)}`;
+const guessBox=guess=>guess?`<div class="mapcheck"><b>가린 뒤 맞혀 보기 · ${GUESS_VERDICT[guess.verdict]}${guess.stable===false?' (답이 흔들림)':''}</b><p class="statement">${escapeHtml(guess.statement)}</p>
+  <table><tr><th>한 장씩</th><td>${guess.photos.map(photo=>`${photo.index}번 ${reachTag(photo.guess)}`).join('<br>')}</td></tr><tr><th>${guess.photos.length}장 함께</th><td>${reachTag(guess.set)}</td></tr></table></div>`:'';
+function showAnalysis(zone,result,check=null,guess=null){
   const element=document.getElementById('analysis');
   if(!element||!detailElement.querySelector('h2')?.textContent.includes(zone.id))return;
   if(!result){element.innerHTML='<div class="box"><b>누적 분석</b><p>아직 실행하지 않았습니다.</p></div>';return;}
@@ -76,6 +84,7 @@ function showAnalysis(zone,result,check=null){
         ${combo.count===null?'':`<b>${combo.count}곳</b>${combo.upperBound?' 이하':''} · `}${UNIT[combo.unitBefore]} → <span class="risk ${UNIT_RISK[combo.unitAfter]}">${UNIT[combo.unitAfter]}</span> · ${VERDICT[combo.verdict]}<br><span class="why">${escapeHtml(combo.note)}</span></div>`).join('')}
       <p class="legend"><i style="background:${HERE}"></i>이 구역 <i style="background:${ELSEWHERE}"></i>같은 패턴이 있는 다른 곳</p>
       <button class="see-candidates">지도에서 후보 전부 보기</button></div>`:''}
+    ${guessBox(guess)}
     <button class="open-proof">위험이 정해진 과정 보기</button>
     <table>
       <tr><th>가장 좁은 단독 단서</th><td>${unitTag(result.clueUnit)}</td></tr>
@@ -89,7 +98,7 @@ function showAnalysis(zone,result,check=null){
     <p class="sub">구역 판정: ${result.model?.transport==='handoff'||!result.model?'대역(프롬프트만 본 에이전트)':`${escapeHtml(result.model.model)} · effort ${escapeHtml(result.model.effort)}`}</p>
     <details><summary>여러 사진에 나와 한 번만 센 증거 ${several.length}개</summary><table>${several.map(item=>`<tr><td>${name(item)}</td><td>사진 ${item.photos.join('·')}</td><td>${UNIT[item.unit]}${item.uncertain?' · 같은 물체인지 불확실':''}</td></tr>`).join('')}</table></details>
   </div>`;
-  element.querySelector('.open-proof').onclick=()=>showProof(zone,result,check);
+  element.querySelector('.open-proof').onclick=()=>showProof(zone,result,check,guess);
   candidateLayer.clearLayers();
   const points=drawCandidates(candidateLayer,check);
   const see=element.querySelector('.see-candidates');
@@ -112,7 +121,7 @@ function ladder(marks){
 }
 const WHY={alone:'혼자서 지점 하나',raised:'검색·주소 추정으로 위치가 확인됨',combination:'사진 한 장 안의 조합으로 지점 하나',text:'이미 뺀 글자를 담고 있음',object:'이미 뺀 것과 같은 물체'};
 const sameAsNote=clue=>clue.why==='text'?`<br><small>사진 ${clue.sameAs.photo}에서 뺀 <code>${escapeHtml(clue.sameAs.text)}</code></small>`:clue.why==='object'?`<br><small>사진 ${clue.sameAs.photo}에서 뺀 것 (사진 비교로 확인)</small>`:'';
-function showProof(zone,result,check=null){
+function showProof(zone,result,check=null,guess=null){
   const element=document.getElementById('proof'),evidence=new Map(result.evidence.map(item=>[item.id,item]));
   const label=item=>item.isText?item.texts.map(text=>`<code>${escapeHtml(text)}</code>`).join(' '):`<code>${escapeHtml(item.key)}</code>`;
   const taken=result.photos.filter(photo=>photo.taken.length);
@@ -170,10 +179,28 @@ function showProof(zone,result,check=null){
       <details><summary>후보 ${combo.count}곳 목록</summary><table>${combo.candidates.map((candidate,index)=>`<tr><td>${index+1}</td><td>${candidate.isTrue?'<b class="risk high">이 구역</b>':'다른 곳'}</td><td>${candidate.places.map(place=>`${escapeHtml(place.name)}${place.near.map(near=>` + ${escapeHtml(near.name)} (${near.distanceM}m)`).join('')}`).join('<br>')}</td></tr>`).join('')}</table></details>`:''}
     </div>`).join('')}`:''}
 
-    <h2>${checked?5:4}. 결론</h2>
+    ${guess?`<h2>${checked?5:4}. 가린 뒤 맞혀 봅니다</h2>
+    <p>단독 분석이 높음으로 잡은 단서(혼자 높음인 것과, 사진 한 장 안의 조합으로 지점 하나가 되는 것)를 회색으로 가린 사진을 만들어, 모델에게 "어디인가"를 물었습니다. 연구 저장소에 위치가 없는 단서는 모델에게 사진에서 어디인지 물어 가렸습니다. 한 장씩 따로 묻고, ${guess.photos.length}장을 "서로 100m 안에서 찍었다"는 말과 함께 한꺼번에 물었습니다. ${guess.repeats>1?`같은 질문을 ${guess.repeats}번씩 물어 가운데 답으로 판정합니다. `:''}답한 주소가 실제 위치에서 ${guess.hitM}m 안이면 장소를 맞힌 것, ${guess.nearM}m 안이면 동네까지 맞힌 것으로 봅니다.</p>
+    <p class="lead ${guess.verdict==='raised'?'raised':''}">${escapeHtml(guess.statement)}</p>
+    <div class="guess-grid">${guess.photos.map(photo=>`<div class="guess-card">
+      <figure class="shot"><div><img loading="lazy" src="/masked/${zone.id}/${photo.runId}" alt=""></div><figcaption>사진 ${photo.index} · 높음 단서 ${photo.flagged}개 중 ${photo.covered.length+(photo.pointed?.length||0)}개 가림${photo.pointed?.length?` (${photo.pointed.length}개는 모델이 짚은 위치)`:''}${photo.uncovered.length?` · <b class="risk high">${photo.uncovered.length}개는 장면 전체에 대한 단서라 못 가림</b>`:''}</figcaption></figure>
+      <p>${reachTag(photo.guess)}</p>
+      <p class="why">답한 주소: ${photo.guess.candidates.map(item=>`${escapeHtml(item.address)}${item.resolved?(item.by==='street'?' (길 단위로만 찾음)':''):' (지도에서 못 찾음)'}`).join('<br>')||'없음'}</p>
+      ${photo.uncoveredDetails?.length?`<details><summary>못 가린 단서 ${photo.uncoveredDetails.length}개</summary><ul>${photo.uncoveredDetails.map(text=>`<li>${escapeHtml(text)}</li>`).join('')}</ul></details>`:''}
+      <p class="why">가리기 전 원본의 추정: ${photo.uncoveredGuessed?far(photo.uncoveredDistanceM):'해 본 적 없음'}</p>
+      <details><summary>모델이 쓴 단서 ${photo.guess.clueList.length}개</summary><ul>${photo.guess.clueList.map(text=>`<li>${escapeHtml(text)}</li>`).join('')}</ul></details>
+    </div>`).join('')}</div>
+    <div class="combo-card"><h3>${guess.photos.length}장을 함께 주면 · ${reachTag(guess.set)}</h3>
+      <p class="why">답한 주소: ${guess.set.candidates.map(item=>`${escapeHtml(item.address)}${item.resolved?(item.by==='street'?' (길 단위로만 찾음)':''):' (지도에서 못 찾음)'}`).join('<br>')||'없음'}</p>
+      <p>모델이 쓴 단서</p><ul>${guess.set.clueList.map(text=>`<li>${escapeHtml(text)}</li>`).join('')}</ul>
+    </div>
+    <p class="foot">추정은 ${escapeHtml(guess.model)}에게 질문마다 ${guess.repeats||1}번씩 물은 것입니다. 모델이 건물 번호를 지어내는 일이 많아 거리는 수백 m씩 흔들릴 수 있습니다. 카드에 보이는 주소와 단서는 가운데 답의 것입니다.</p>`:''}
+
+    <h2>${(checked?5:4)+(guess?1:0)}. 결론</h2>
     ${ladder(marks)}
     <p class="lead ${result.raised?'raised':''}">${escapeHtml(result.statement)}</p>
     ${checked?`<p class="lead ${checked.raisedAfter?'raised':''}">${escapeHtml(checked.statement)}</p>`:''}
+    ${guess?`<p class="lead ${guess.verdict==='raised'?'raised':''}">${escapeHtml(guess.statement)}</p>`:''}
     <p class="foot">조합은 ${result.model?.transport==='handoff'?'대역':escapeHtml(result.model.model)}이 단서 글만 보고 판정했습니다${checked?'. 지도 확인은 장소의 종류와 지역 이름만 셀 수 있고 모양·분위기는 셀 수 없어, 센 개수는 실제로 맞는 곳의 상한입니다':'. 실제 지도 검색으로 확인한 것은 아닙니다'}. 구성 단서보다 좁아지지 않는 조합, 한 사진 안에서 다 보이는 조합은 코드가 걸러 냅니다${result.rejected.length?` (걸러 낸 조합 ${result.rejected.length}개)`:''}.</p>
   </div>`;
   element.hidden=false;element.scrollTop=0;
@@ -228,6 +255,9 @@ fetch('/api/zones').then(response=>response.json()).then(data=>{
       const line=document.createElement('span');
       line.innerHTML=`누적 <span class="risk ${result.zoneRisk}">${RISK[result.zoneRisk]}</span> (${UNIT[result.zoneUnit]})${result.raised?' · <span class="risk high">단독보다 위험해짐</span>':''}`;
       button.querySelector('div').append(document.createElement('br'),line);
+      getJson(`/api/guess/${zone.id}`).then(guess=>{
+        if(guess)line.innerHTML+=`<br>가린 뒤 추정: ${guess.verdict==='raised'?'<span class="risk high">함께 주면 더 가까이 맞힘</span>':GUESS_VERDICT[guess.verdict]}${guess.stable===false?' · 답이 흔들림':''} (함께 ${far(guess.set.distanceM)})`;
+      });
       getJson(`/api/map-check/${zone.id}`).then(check=>{
         const counted=(check?.combinations||[]).filter(combo=>combo.count!==null);
         if(counted.length)line.innerHTML+=`<br>지도 확인 ${counted.map(combo=>`${combo.kind==='places'?'장소 전부':'조합'} ${combo.count}곳`).join(', ')}${check.raisedAfter?' · <span class="risk high">지도로도 더 위험</span>':''}`;
