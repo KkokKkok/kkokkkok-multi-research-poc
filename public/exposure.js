@@ -16,6 +16,28 @@ const layer=L.layerGroup().addTo(map);
 const peopleElement=document.getElementById('people'),personElement=document.getElementById('person');
 let people=[],current=null,selected=null,markers=new Map();
 
+// The virtual attacker (lib/attacker.mjs): where the places given away lead without the registered
+// place, in three states. The row of the state on screen is marked.
+const VERDICT_CLASS={found:'grade-high',near:'grade-caution',area:'grade-low',none:'grade-low'};
+const metresKo=value=>value===null?'—':value>=1000?`${Math.round(value/100)/10}km`:`${value}m`;
+function attackerSection(person){
+  const seen=person.attacker;
+  if(!seen)return '';
+  const states=[['all','원래 사진',seen.original],['noHigh','높음 단서가 없을 때',seen.noHigh],['edited','한 장씩 편집한 뒤',seen.edited]];
+  const now=mode==='all'?seen.original:seen.noHigh,names=new Map(person.groups.map(group=>[group.id,group.name]));
+  return `<h2>가상 공격자 <span class="small muted">— 등록 장소를 모르는 채, 드러난 장소만으로 거꾸로 찾기</span></h2>
+    <div class="note ${now.verdict.key==='found'||now.verdict.key==='near'?'attack':'calm'}"><b class="${VERDICT_CLASS[now.verdict.key]}">${now.verdict.ko}</b> · ${now.lines.map(escapeHtml).join(' ')}</div>
+    <table class="attack" style="margin-top:8px">
+      <tr><th>상태</th><th>판정</th><th>뒤져야 하는 범위</th><th>근거 (등록 장소 / 최고)</th><th>가장 가까운 후보</th></tr>
+      ${states.map(([key,label,state])=>`<tr class="${key===mode?'on':''}"><td>${label}</td><td><b class="${VERDICT_CLASS[state.verdict.key]}">${state.verdict.ko}</b></td>
+        <td>${state.searchRadiusM===null?'<span class="muted">닿지 못함</span>':`반경 ${metresKo(state.searchRadiusM)} <span class="muted">(${state.searchAreaKm2}km²)</span>`}</td>
+        <td>${state.support} / ${state.peak}</td>
+        <td>${state.candidate?`${state.candidate.rank}순위 · ${metresKo(state.candidate.distanceM)}`:'<span class="muted">후보 없음</span>'}</td></tr>`).join('')}
+    </table>
+    ${seen.influence.length?`<p class="small" style="margin:8px 0 0">가리면 범위가 가장 넓어지는 곳: ${seen.influence.slice(0,3).map(item=>`<b>${escapeHtml(item.groupId)}</b> ${escapeHtml(names.get(item.groupId)??'')} <span class="muted">(→ ${item.searchRadiusM===null?'닿지 못함':`반경 ${metresKo(item.searchRadiusM)}`})</span>`).join(', ')}</p>`:''}
+    <p class="small muted" style="margin:6px 0 0">드러난 장소마다 "이 근처에 거점이 있다"는 근거를 주변에 깔고(지점 하나는 그 자리, 몇 곳은 500m, 도시·구는 2.5km 흐리게), 근거가 높은 곳부터 뒤질 때 등록 장소에 닿기까지의 넓이입니다. 좁을수록 위험해요. 지도의 초록 원이 공격자의 후보입니다.${person.place.source==='folder-estimate'?' 지금은 등록 장소도 같은 사진으로 추정한 것이라 실제보다 잘 맞게 나옵니다.':''}</p>`;
+}
+
 // The score after each protective edit, as a small line chart. A triangle marks a step that comes
 // with a warning: covering the photos' own clues is not enough once the photos are read together.
 function editChart(person){
@@ -70,6 +92,8 @@ function showPerson(person){
     ${reopened}
     ${mode==='all'&&stuck.length?`<p class="small muted" style="margin-top:8px">편집 뒤에도 남는 곳 ${stuck.length}곳: ${stuck.map(group=>`${escapeHtml(group.groupId)}(${unitOf(group.L)[0]}${group.uncoverable?', 가릴 수 없는 단서':''})`).join(', ')}</p>`:''}
 
+    ${attackerSection(person)}
+
     <h2>근거 문장</h2>
     <ul class="sent">${now.sentences.map(line=>`<li>${escapeHtml(line.text)}</li>`).join('')}</ul>
 
@@ -112,6 +136,14 @@ function drawMap(person,now){
       .bindTooltip(`${group.id} ${group.name} · ${unitOf(group.Lnow)[0]} · ${group.k}일${reopened?' · 사진 합치면 다시 드러남':''}`);
     marker.on('click',()=>selectGroup(group.id,false));
     markers.set(group.id,marker);points.push([group.centre.lat,group.centre.lon]);
+  }
+  // The attacker's candidates in the state on screen: the best supported region, as a circle of its area.
+  const seen=person.attacker&&(mode==='all'?person.attacker.original:person.attacker.noHigh);
+  for(const candidate of seen?.candidates??[]){
+    const tip=`공격자 후보 ${candidate.rank}순위 · 근거 ${candidate.support}${candidate.nearest?` · 등록 장소에서 ${metresKo(candidate.nearest.distanceM)}`:''}${candidate.unregistered?' · 등록하지 않은 거점':''}`;
+    L.circle([candidate.lat,candidate.lon],{radius:Math.max(candidate.radiusM,40),color:'#0f766e',weight:2,dashArray:'6 4',fillColor:'#0f766e',fillOpacity:0.12}).addTo(layer).bindTooltip(tip,{sticky:true});
+    L.circleMarker([candidate.lat,candidate.lon],{radius:4,color:'#fff',weight:1.5,fillColor:'#0f766e',fillOpacity:1}).addTo(layer).bindTooltip(tip);
+    points.push([candidate.lat,candidate.lon]);
   }
   map.fitBounds(points,{padding:[40,40],maxZoom:16});
 }

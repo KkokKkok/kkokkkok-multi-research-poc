@@ -6,11 +6,14 @@
 // A clue's unit is the rule sheet's own reading (the lab's ruleOf), and a combination is one the sheet
 // admits within one photo; the address guess of the evaluation records is left out, since it used the
 // true position. Combinations across photos are not counted (the document leaves them for later).
-//   private-data/exposure/<folder>.json   groups, A, B, S, the sentences and the edits suggested
+// The virtual attacker (lib/attacker.mjs) is worked out next to the score: where the places the photos
+// give away lead, without the registered place, and how soon that search reaches it.
+//   private-data/exposure/<folder>.json   groups, A, B, S, the sentences, the edits suggested, the attacker
 import { readFileSync,writeFileSync,mkdirSync,existsSync } from 'node:fs';
 import { resolve,dirname } from 'node:path';
 import { fileURLToPath,pathToFileURL } from 'node:url';
-import { STRENGTH,UNIT_KO,score,sentences,suggestEdits,residual,withoutHigh,capOther } from '../lib/exposure-score.mjs';
+import { STRENGTH,UNIT_KO,score,sentences,suggestEdits,residual,withoutHigh,capOther,applyEdits } from '../lib/exposure-score.mjs';
+import { attack,influenceOf,attackerLines } from '../lib/attacker.mjs';
 import { loadPlaces } from '../lib/places.mjs';
 import { metres } from '../lib/kakao.mjs';
 
@@ -118,10 +121,19 @@ for(const place of places.filter(item=>!only||item.folder===only)){
     groups:bareRule.groups.map((group,index)=>({id:group.id,L:group.L,k:group.k,a:Math.round(group.a*100)/100,share:Math.round(group.share*100)/100,LCross:bareCross.groups[index].L,crossLifts:bareCross.groups[index].crossLifts,
       deciding:[...new Set(bareCross.groups[index].deciding.map(candidate=>candidate.label))]})),
     edits:suggestEdits(bare,{cross:true,maxSteps:30})};
+  // The virtual attacker: the photos read together (the combinations across photos count), in three
+  // states: as they are, without the clues that are high alone, and after the document's own edits.
+  const registered=[{id:place.id,lat:place.lat,lon:place.lon}];
+  const seen=state=>{
+    const found=attack(score(state,{cross:true}).groups,{registered});
+    return {...found.places[0],peak:found.peak,evidence:found.evidence,candidates:found.candidates,lines:attackerLines(found,place.id)};
+  };
+  const attacker={original:seen(groups),noHigh:seen(bare),edited:seen(applyEdits(groups,suggestEdits(groups,{cross:false,maxSteps:50}))),
+    influence:influenceOf(score(groups,{cross:true}).groups,place.id,{registered}).slice(0,5)};
   // Positions are kept for the local viewer's map only (private-data, served to this machine).
-  const output={schemaVersion:'exposure-score-v2',createdAt:new Date().toISOString(),person:place.folder,place:{id:place.id,kind:place.kind,kindKo:place.kindKo,name:place.name,source,lat:place.lat,lon:place.lon},
+  const output={schemaVersion:'exposure-score-v3',createdAt:new Date().toISOString(),person:place.folder,place:{id:place.id,kind:place.kind,kindKo:place.kindKo,name:place.name,source,lat:place.lat,lon:place.lon},
     A:result.A,m:result.m,B:result.B,S:result.S,grade:{key:result.grade.key,ko:result.grade.ko,line:result.grade.line},
-    withCross:{A:withCross.A,m:withCross.m,B:withCross.B,S:withCross.S,grade:withCross.grade.key},excluded,sentences:lines,edits,residual:left,noHigh,
+    withCross:{A:withCross.A,m:withCross.m,B:withCross.B,S:withCross.S,grade:withCross.grade.key},excluded,sentences:lines,edits,residual:left,noHigh,attacker,
     groups:result.groups.map((group,index)=>{
       const crossed=withCross.groups[index];
       return {id:group.id,name:group.name,photos:group.photos.length,linkable:group.linkable,L:group.L,unit:unitOfL(group.L),unitKo:UNIT_KO[unitOfL(group.L)]??'단서 없음',
@@ -137,5 +149,8 @@ for(const place of places.filter(item=>!only||item.folder===only)){
   for(const group of output.groups.filter(group=>group.w>0||group.L>0))console.log(`  ${group.id.padEnd(4)} ${group.name.slice(0,24).padEnd(24)} 사진 ${group.photos} L ${group.L}${group.cross.length?` (사진 간 조합 ${group.cross.map(item=>`${item.type}:${item.unit}`).join(',')})`:''} k ${group.k} R ${group.R} w ${group.w}(${group.band??'3km 밖'}) → L·R·w ${group.a}, L·w ${group.share}`);
   for(const line of lines)console.log(`  · ${line.text}`);
   for(const edit of edits)console.log(`  ✎ ${edit.text} [사진 간 조합 포함 점수 ${edit.SAfterCross}]`);
+  const said=state=>`${state.verdict.ko}${state.searchRadiusM===null?'':` 반경 ${state.searchRadiusM}m`}${state.candidate?` (${state.candidate.rank}순위 후보에서 ${state.candidate.distanceM}m)`:''}`;
+  console.log(`  ◎ 가상 공격자: 원래 ${said(attacker.original)} | 높음 단서 없이 ${said(attacker.noHigh)} | 한 장씩 편집 뒤 ${said(attacker.edited)}`);
+  if(attacker.influence.length)console.log(`    빼면 가장 넓어지는 곳: ${attacker.influence.slice(0,3).map(item=>`${item.groupId} → ${item.searchRadiusM===null?'찾지 못함':`${item.searchRadiusM}m`}`).join(', ')}`);
   console.log(`  ▶ 문서 방식 편집 ${left.steps}단계 뒤: 점수 ${left.S}(${left.grade}), 사진 간 조합 포함 ${left.SCross}(${left.gradeCross})${left.reopened.length?` · 다시 드러나는 곳: ${left.reopened.map(group=>`${group.groupId} ${UNIT_KO[Object.keys(STRENGTH).find(unit=>STRENGTH[unit]===group.ownL)]}→${UNIT_KO[Object.keys(STRENGTH).find(unit=>STRENGTH[unit]===group.L)]} (${group.by.map(item=>`사진 ${item.photos.join('·')} ${item.label}`).join('; ')})`).join(' / ')}`:''}`);
 }
