@@ -1,15 +1,16 @@
 // Local viewer for the GPS zones. Serves this machine only (127.0.0.1): the data has the photos'
 // coordinates and the photos themselves.
 //   node server.mjs            http://localhost:3020
-//   PORT=3021 node server.mjs
+//   PORT=3021 node server.mjs   or   node server.mjs --port 3021
 import { createServer } from 'node:http';
-import { readFileSync,existsSync } from 'node:fs';
+import { readFileSync,existsSync,readdirSync } from 'node:fs';
 import { resolve,dirname,extname } from 'node:path';
 import { fileURLToPath } from 'node:url';
 
 const root=dirname(fileURLToPath(import.meta.url));
 const lab=resolve(process.env.KKOK_LAB_ROOT||'C:/KKokKKok/KkokKkok-Research-PoC/location-cue-lab');
-const port=Number(process.env.PORT||3020);
+const portArg=process.argv.indexOf('--port');
+const port=Number(portArg>0?process.argv[portArg+1]:process.env.PORT||3020);
 const TYPES={'.html':'text/html; charset=utf-8','.js':'text/javascript; charset=utf-8','.css':'text/css; charset=utf-8'};
 const send=(response,status,type,body)=>{response.writeHead(status,{'content-type':type,'cache-control':'no-store'});response.end(body);};
 
@@ -30,6 +31,12 @@ createServer((request,response)=>{
   if(mapCheck){
     const file=resolve(root,'private-data/zone-analysis',mapCheck[1],'map-check.json');
     return send(response,200,'application/json; charset=utf-8',existsSync(file)?readFileSync(file):'null');
+  }
+  // The exposure score of every person (scripts/score-exposure.mjs): [result], empty when not run yet.
+  if(path==='/api/exposure'){
+    const directory=resolve(root,'private-data/exposure');
+    const results=existsSync(directory)?readdirSync(directory).filter(name=>name.endsWith('.json')).map(name=>JSON.parse(readFileSync(resolve(directory,name),'utf8'))):[];
+    return send(response,200,'application/json; charset=utf-8',JSON.stringify(results));
   }
   const photo=path.match(/^\/photo\/([0-9a-f-]{36})$/);
   if(photo){

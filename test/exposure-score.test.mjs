@@ -1,7 +1,7 @@
 // The worked example of the rule document (§6 scenario 1 and §8): the numbers must come out as written there.
 import { test } from 'node:test';
 import assert from 'node:assert/strict';
-import { score,sentences,suggestEdits,cover,repeatOf,weightOf } from '../lib/exposure-score.mjs';
+import { score,sentences,suggestEdits,cover,residual,withoutHigh,capOther,repeatOf,weightOf } from '../lib/exposure-score.mjs';
 
 const clue=(s,key,label,fixed=false)=>({s,targets:[key],label,fixed});
 const interior=n=>clue(0.2,`interior-${n}`,'평범한 실내',true);
@@ -39,6 +39,61 @@ test('§8 first candidates: 81, 83, 88, 89',()=>{
   assert.equal(after(3,'cafe-sign'),83);
   assert.equal(after(1,'museum-name'),88);
   assert.equal(after(2,'mart-logo'),89);
+});
+
+// A place whose name gives it away in one photo, while two chains seen in two different photos give
+// it away together too (a combination across photos, from the zone analysis): covering the name is
+// not enough once the photos are read together.
+const name=clue(1,'shop-name','상호 간판'),chainA=clue(0.2,'chain-a','체인 A 로고'),chainB=clue(0.2,'chain-b','체인 B 로고');
+const shop={id:'shop',name:'○○가게',distanceM:200,photos:[
+  {id:'p1',index:1,day:'2026-11-01',candidates:[name,chainA]},
+  {id:'p2',index:2,day:'2026-11-02',candidates:[chainB]}],
+  cross:[{s:0.6,requires:[['chain-a'],['chain-b']],labels:['체인 A 로고','체인 B 로고'],label:'체인 A + 체인 B',photos:[1,2]}]};
+
+test('place layer: a combination across photos counts only when asked for',()=>{
+  assert.equal(score([shop]).groups[0].L,1);
+  const covered=cover(shop,['shop-name']);
+  assert.equal(score([covered]).groups[0].L,0.2);
+  const withCross=score([covered],{cross:true}).groups[0];
+  assert.equal(withCross.L,0.6);assert.equal(withCross.crossLifts,true);
+  assert.equal(score([cover(covered,['chain-b'])],{cross:true}).groups[0].L,0.2);
+});
+
+test('edit loop: the warning, then the combination\'s member as the next edit',()=>{
+  const steps=suggestEdits([shop]);
+  assert.equal(steps[0].label,'상호 간판');
+  assert.equal(steps[0].LAfter,0.2);assert.equal(steps[0].LCrossAfter,0.6);
+  assert.match(steps[0].warning,/사진 1·2을\(를\) 함께 보면 체인 A \+ 체인 B\(으\)로 여전히 몇 곳까지/);
+  assert.ok(steps[1].keys.some(key=>key.startsWith('chain-')));
+  assert.ok(steps[1].LCrossAfter<0.6);assert.equal(steps[1].warning,undefined);
+  // Without the combinations across photos the loop stops once the document's score is low.
+  assert.equal(suggestEdits([shop],{cross:false}).length,1);
+});
+
+test('residual: the document\'s plan, read with the combinations across photos',()=>{
+  const left=residual([shop]);
+  assert.equal(left.steps,1);
+  assert.ok(left.SCross>left.S);
+  assert.deepEqual(left.reopened.map(group=>[group.groupId,group.L,group.ownL]),[['shop',0.6,0.2]]);
+});
+
+test('without the clues that are high alone',()=>{
+  // The shop's name goes; the chains stay, and read together they give the place away again.
+  const [left]=withoutHigh([shop]);
+  assert.deepEqual(left.covered,['shop-name']);
+  assert.equal(score([left]).groups[0].L,0.2);
+  assert.equal(score([left],{cross:true}).groups[0].L,0.6);
+  // The document's example: the museum's name and the café's sign go, the window sign stays.
+  const S=score(withoutHigh(groups)).groups.map(group=>group.L);
+  assert.deepEqual(S,[0.6,0.6,0.2,0.2]);
+});
+
+test('"other" combinations: one unit narrower at most, never a point until verified',()=>{
+  assert.deepEqual(capOther('point',['few','city']),{unit:'few',capped:true});
+  assert.deepEqual(capOther('point',['city','city']),{unit:'few',capped:true});
+  assert.deepEqual(capOther('few',['city','city']),{unit:'few',capped:false});
+  assert.deepEqual(capOther('few',['country','country']),{unit:'city',capped:true});
+  assert.deepEqual(capOther('point',['few','city'],{verified:true}),{unit:'point',capped:false});
 });
 
 test('§8 greedy order: 81, 67, 59, 42, 34',()=>{
