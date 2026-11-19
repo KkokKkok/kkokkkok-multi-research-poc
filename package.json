@@ -4,6 +4,9 @@
   "type": "module",
   "scripts": {
     "zones": "node scripts/build-zones.mjs",
-    "start": "node server.mjs"
+    "start": "node server.mjs",
+    "places": "node scripts/estimate-places.mjs",
+    "score": "node scripts/score-exposure.mjs",
+    "test": "node --test test/exposure-score.test.mjs"
   }
 }

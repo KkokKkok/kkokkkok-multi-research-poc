@@ -49,13 +49,25 @@ const clusters=readJson(resolve(paper,'batches/gps-clusters-100m.json'));
 const zoneOfRun=new Map();
 clusters.clusters.forEach((cluster,index)=>cluster.photos.forEach(photo=>zoneOfRun.set(photo.runId,index)));
 
+// The day a photo was taken (EXIF DateTimeOriginal, as the camera wrote it: "2026-11-03"), or null.
+// Only the date is kept: the visit count of the exposure score needs no more.
+function dayOf(exif){
+  if(!exif)return null;
+  try{
+    const tags=exifReader(exif),value=tags.Photo?.DateTimeOriginal??tags.Image?.DateTime??null;
+    return value instanceof Date&&!Number.isNaN(value.getTime())?value.toISOString().slice(0,10):null;
+  }catch{return null;}
+}
+
 const zones=clusters.clusters.map((cluster,index)=>({id:`G${index}`,name:cluster.name,maxPairM:cluster.maxPairM,photos:[]})),singles=[];
 let withoutGps=0;
+const withoutGpsByFolder={};
 for(const photo of all){
-  const gps=photo.file?gpsOf((await sharp(readFileSync(resolve(lab,'private-data/new-photos',photo.folder,photo.file))).metadata()).exif):null;
-  if(!gps){withoutGps++;continue;}
+  const exif=photo.file?(await sharp(readFileSync(resolve(lab,'private-data/new-photos',photo.folder,photo.file))).metadata()).exif:null;
+  const gps=gpsOf(exif);
+  if(!gps){withoutGps++;withoutGpsByFolder[photo.folder]=(withoutGpsByFolder[photo.folder]??0)+1;continue;}
   const run=readJson(resolve(paper,'runs',`${photo.runId}.json`));
-  const entry={label:`${photo.folder} ${photo.index}`,folder:photo.folder,index:photo.index,runId:photo.runId,...gps,judged:run.clues.some(clue=>clue.rule),clues:run.clues.map(clueOf)};
+  const entry={label:`${photo.folder} ${photo.index}`,folder:photo.folder,index:photo.index,runId:photo.runId,...gps,day:dayOf(exif),judged:run.clues.some(clue=>clue.rule),clues:run.clues.map(clueOf)};
   if(zoneOfRun.has(photo.runId))zones[zoneOfRun.get(photo.runId)].photos.push(entry);else singles.push(entry);
 }
 for(const zone of zones){
@@ -64,5 +76,5 @@ for(const zone of zones){
   zone.folder=zone.photos[0].folder;
 }
 mkdirSync(resolve(root,'private-data'),{recursive:true});
-writeFileSync(resolve(root,'private-data/zones.json'),JSON.stringify({createdAt:new Date().toISOString(),radiusM:clusters.radiusM,linkage:clusters.linkage,zones,singles},null,1));
+writeFileSync(resolve(root,'private-data/zones.json'),JSON.stringify({createdAt:new Date().toISOString(),radiusM:clusters.radiusM,linkage:clusters.linkage,zones,singles,withoutGpsByFolder},null,1));
 console.log(JSON.stringify({zones:zones.length,photosInZones:zones.reduce((sum,zone)=>sum+zone.photos.length,0),singles:singles.length,withoutGps}));
